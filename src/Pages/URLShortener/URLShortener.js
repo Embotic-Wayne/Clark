@@ -2,18 +2,20 @@ import React, { useEffect, useState } from 'react';
 
 
 import { getAllUrls, createUrl, deleteUrl } from '../../APIFunctions/Cleezy';
-import { trashcanSymbol } from '../Overview/SVG';
+import { trashcanSymbol, copyIcon} from '../Overview/SVG';
+// import { copyIcon } from './SVG.js';
 import ConfirmationModal from '../../Components/DecisionModal/ConfirmationModal.js';
-import { useUser } from '../../Components/context/UserContext';
+import { useSCE } from '../../Components/context/SceContext.js';
 
 export default function URLShortenerPage() {
-  const { user } = useUser();
+  const { user } = useSCE();
   const [isCleezyDisabled, setIsCleezyDisabled] = useState(false);
   const [url, setUrl] = useState('');
   const [invalidUrl, setInvalidUrl] = useState();
   const [showUrlInput, setShowUrlInput] = useState(false);
   const [useGeneratedAlias, setUseGeneratedAlias] = useState(false);
   const [alias, setAlias] = useState('');
+  const [expDateTime, setExpDateTime] = useState('');
   const [allUrls, setAllUrls] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState();
@@ -22,15 +24,19 @@ export default function URLShortenerPage() {
   const [page, setPage] = useState(0);
   const [total, setTotal] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(10);
-  const [searchQuery, setSearchQuery] = useState(null);
+  const [searchQuery, setSearchQuery] = useState('');
   const [invalidSearch, setInvalidSearch] = useState(false);
   const [errorAlertMessage, setErrorAlertMessage] = useState('');
   const [urlToDelete, setUrlToDelete] = useState({});
   const [toggleDelete, setToggleDelete] = useState(false);
   const [currentSortColumn, setCurrentSortColumn] = useState(null);
   const [currentSortOrder, setCurrentSortOrder] = useState(null);
+  const query = new URLSearchParams(window.location.search);
+  const rawData = query.get('data');
 
-  const INPUT_CLASS = 'indent-2 block w-full rounded-md border-0 py-1.5 text-slate-800 dark:text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-slate-700 dark:placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6 text-gray';
+  const [copyingId, setCopyingId] = useState(null);
+
+  const COPY_ICON_CLASS = 'transition-colors duration-500 dark:fill-[#dcdcdc] fill-[#434343]';
   const LABEL_CLASS = 'block text-sm font-medium leading-6 text-slate-800 dark:text-gray-300';
 
   /**
@@ -60,16 +66,24 @@ export default function URLShortenerPage() {
   }
 
   async function handleCreateUrl() {
+    const expiresAt = expDateTime ? new Date(expDateTime).toISOString() : null;
     const response = await createUrl(
       url.trim(),
       alias.trim(),
+      expiresAt,
       user.token
     );
     if (!response.error) {
-      setAllUrls([...allUrls, response.responseData]);
+      if (page === 0){
+        if (allUrls.length >= rowsPerPage){
+          allUrls.pop();
+        }
+        allUrls.unshift(response.responseData);
+      }
       setAliasTaken(false);
       setUrl('');
       setAlias('');
+      setExpDateTime('');
       setShowUrlInput(false);
       setTotal(total + 1);
       setSuccessMessage(`Sucessfully created shortened link ${response.responseData.link}`);
@@ -79,7 +93,7 @@ export default function URLShortenerPage() {
       return true;
     } else {
       setAliasTaken(true);
-      setErrorAlertMessage('That alias is taken!');
+      setErrorAlertMessage(response.responseData || 'Unknown error during URL creation!');
       return false;
     }
   }
@@ -143,7 +157,6 @@ export default function URLShortenerPage() {
     return 'hidden';
   }
 
-
   useEffect(() => {
     if (useGeneratedAlias) {
       setAlias('');
@@ -170,8 +183,29 @@ export default function URLShortenerPage() {
   }, [alias]);
 
   useEffect(() => {
-    getCleezyUrls(page, searchQuery, currentSortColumn, currentSortOrder);
+    if (rawData) {
+      const parsedObject = JSON.parse(decodeURIComponent(rawData));
+
+      if (!parsedObject) return;
+      setAllUrls([parsedObject]);
+
+      // remove ?data=... from URL
+      const url = new URL(window.location);
+      url.searchParams.delete('data');
+      window.history.replaceState({}, '', url);
+    } else {
+      getCleezyUrls(page, searchQuery, currentSortColumn, currentSortOrder);
+    }
   }, [page, currentSortColumn, currentSortOrder]);
+
+  useEffect(() => {
+    if (copyingId !== null) {
+      const timeout = setTimeout(() => {
+        setCopyingId(null);
+      }, 450);
+      return () => clearTimeout(timeout);
+    }
+  }, [copyingId]);
 
   function maybeRenderErrorAlert() {
     if (invalidUrl || aliasTaken || invalidSearch) {
@@ -255,6 +289,7 @@ export default function URLShortenerPage() {
                 <div className="mt-2">
                   <input
                     id="alias"
+                    placeholder='myurl'
                     name="alias"
                     value={alias}
                     onChange={e => setAlias(e.target.value)}
@@ -275,7 +310,7 @@ export default function URLShortenerPage() {
 
             <div className="col-span-full sm:col-span-4">
               <label htmlFor="url" className={LABEL_CLASS}>
-                Original URL
+                  Original URL
               </label>
               <div className="mt-2">
                 <input
@@ -285,11 +320,24 @@ export default function URLShortenerPage() {
                   placeholder="https://example.com"
                   value={url}
                   onChange={e => setUrl(e.target.value)}
-                  className="w-full text-sm input input-bordered sm:text-base"
+                  className="w-full text-sm input input-bordered sm:text-base mb-2"
                 />
               </div>
+              <label htmlFor="expDateTime" className={LABEL_CLASS}>
+                  Optional Expiration Date & Time
+              </label>
+              <div className="mt-2">
+                <input
+                  type="datetime-local"
+                  value={expDateTime}
+                  onChange={(e) => setExpDateTime(e.target.value)}
+                  className="w-full text-sm input input-bordered sm:text-base mb-2"
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Time is in your local timezone ({Intl.DateTimeFormat().resolvedOptions().timeZone}).
+                </p>
+              </div>
             </div>
-
           </div>
         </div>
       </div>
@@ -306,7 +354,7 @@ export default function URLShortenerPage() {
           disabled={!url || (!useGeneratedAlias && !alias)}
           onClick={() => maybeSubmitUrl()}
         >
-          Save
+            Save
         </button>
       </div>
     </div>);
@@ -340,6 +388,16 @@ export default function URLShortenerPage() {
           setSearchQuery(event.target.value);
         } } /></>
     );
+  }
+
+  function renderCopyIconOrCheckbox(urlId, urlHref) {
+    if (copyingId === urlId) {
+      return (<span className="text-green-500 transition-opacity duration-200">✅</span>);
+    }
+    return copyIcon(COPY_ICON_CLASS, () => {
+      navigator.clipboard.writeText(urlHref);
+      setCopyingId(urlId);
+    });
   }
 
   if (isCleezyDisabled) {
@@ -426,9 +484,10 @@ export default function URLShortenerPage() {
                   <tr>
                     {[
                       { title: 'URL', className: 'text-base text-slate-800 dark:text-white/70', columnName: 'alias' },
-                      { title: 'Created At', className: 'text-base text-slate-800 dark:text-white/70 hidden text-center sm:table-cell', columnName: 'created_at' },
-                      { title: 'Times Used', className: 'text-base text-slate-800 dark:text-white/70 text-center', columnName: 'used' },
-                      { title: 'Delete', className: 'text-base text-slate-800 dark:text-white/70 text-center' }
+                      { title: 'Created At', className: 'text-base text-slate-800 dark:text-white/70 hidden text-center md:table-cell', columnName: 'created_at' },
+                      { title: 'Expires At', className: 'text-base text-slate-800 dark:text-white/70 hidden text-center md:table-cell', columnName: 'expires_at' },
+                      { title: 'Times Used', className: 'text-base text-slate-800 dark:text-white/70 hidden text-center md:table-cell', columnName: 'used' },
+                      { title: 'Delete', className: 'text-base text-slate-800 dark:text-white/70 text-center' },
                     ].map(({ title, className, columnName = null }) => (
                       <th
                         className={`${className}`}
@@ -449,18 +508,42 @@ export default function URLShortenerPage() {
                 </thead>
 
                 <tbody>
-                  {allUrls.map((url, index) => {
+                  {allUrls.map((url) => {
                     return (
-                      <tr className='break-all !rounded md:break-keep hover:bg-white/10' key={index}>
+                      <tr className='break-all !rounded md:break-keep hover:bg-white/10' key={url.id}>
                         <td className=''>
-                          <a className='link link-hover link-info' target="_blank" rel="noopener noreferrer" href={`${url.link}`}>
-                            {url.alias}
-                          </a>
+                          <div className='pb-2 flex flex-row gap-2'>
+                            <a className='link link-hover link-info' target="_blank" rel="noopener noreferrer" href={`${url.link}`}>
+                              {url.alias}
+                            </a>
+                            {renderCopyIconOrCheckbox(url.id, url.link)}
+                          </div>
                           <p>{url.url.length > 60 ? url.url.slice(0, 50) + '...' : url.url}</p>
                         </td>
                         <td className='hidden md:table-cell'>
-                          <div className='flex items-center justify-center'>
-                            {new Date(url.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}                            </div>
+                          <div className='flex flex-col items-center'>
+                            <span className='block'>
+                              {new Date(url.created_at.replace(' ', 'T') + 'Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric'})}
+                            </span>
+                            <span className='block text-sm text-blue-400'>
+                              {new Date(url.created_at.replace(' ', 'T') + 'Z').toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="hidden md:table-cell">
+                          {url.expires_at ? (
+                            <div className="flex flex-col items-center">
+                              <span className='block'>
+                                {new Date(url.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric'})}
+                              </span>
+                              <span className='block text-sm text-blue-400'>
+                                {new Date(url.expires_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })}
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="flex flex-col items-center text-white-500">-</div>
+                          )}
+
                         </td>
                         <td className='hidden md:table-cell'>
                           <div className='flex items-center justify-center'>

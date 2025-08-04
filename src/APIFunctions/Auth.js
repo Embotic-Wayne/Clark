@@ -1,5 +1,4 @@
 import { UserApiResponse, ApiResponse } from './ApiResponses';
-import { updateLastLoginDate } from './User';
 import { BASE_API_URL } from '../Enums';
 
 
@@ -73,17 +72,17 @@ export async function loginUser(email, password) {
       },
       body: JSON.stringify({ email, password })
     });
+    const result = await res.json();
     if (res.ok) {
-      const result = await res.json();
       status.token = result.token;
-      await updateLastLoginDate(email, result.token);
       window.location.reload();
-    } else {
-      status.error = true;
+      return status;
     }
-  } catch(err) {
     status.error = true;
-    status.responseData = err.response;
+    status.responseData = result.message;
+  } catch(err) {
+    status.responseData = 'Backend may be down, check with the dev team! Error was: ' + err.message;
+    status.error = true;
   }
   return status;
 }

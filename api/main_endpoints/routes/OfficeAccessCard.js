@@ -6,6 +6,7 @@ const {
   OK,
   FORBIDDEN,
 } = require('../../util/constants').STATUS_CODES;
+const { OFFICER } = require('../../util/constants').MEMBERSHIP_STATE;
 const express = require('express');
 const router = express.Router();
 const bodyParser = require('body-parser');
@@ -25,6 +26,8 @@ const {
   generateAlias,
   deleteCard,
 } = require('../util/OfficeAccessCard.js');
+const AuditLogActions = require('../util/auditLogActions.js');
+const AuditLog = require('../models/AuditLog.js');
 
 router.use(bodyParser.json());
 
@@ -90,8 +93,13 @@ router.get('/verify', async (req, res) => {
     return res.sendStatus(UNAUTHORIZED);
   }
 
-  const cardExists = await checkIfCardExists(cardBytes);
+  const cardExists = await checkIfCardExists({ cardBytes });
   if (cardExists) {
+    const alias = cardExists.alias;
+    AuditLog.create({
+      action: AuditLogActions.VERIFY_CARD,
+      details: { alias }
+    });
     writeLogToClient(req.method, { alias: cardExists.alias, statusCode: OK });
     return res.sendStatus(OK);
   }
@@ -107,10 +115,13 @@ router.get('/verify', async (req, res) => {
   const alias = await generateAlias();
   try {
     logger.info('adding a new card');
-    await new OfficeAccessCard({
-      cardBytes,
-      alias,
-    }).save();
+    const newCard = await new OfficeAccessCard({ cardBytes, alias, }).save();
+    if (newCard) {
+      AuditLog.create({
+        action: AuditLogActions.ADD_CARD,
+        details: { alias }
+      });
+    }
     writeLogToClient(req.method, {
       alias,
       statusCode: OK,
@@ -131,12 +142,13 @@ router.get('/verify', async (req, res) => {
 });
 
 router.post('/delete', async (req, res) => {
-  if (!await decodeToken(req)) {
+  const decoded = decodeToken(req);
+  if (!decoded) {
     return res.sendStatus(UNAUTHORIZED);
   }
 
-  const { cardBytes } = req.body;
-  if (!cardBytes) {
+  const { alias } = req.body;
+  if (!alias) {
     writeLogToClient(req.method, {
       statusCode: BAD_REQUEST,
       message: 'cardBytes missing from request',
@@ -144,8 +156,8 @@ router.post('/delete', async (req, res) => {
     return res.sendStatus(BAD_REQUEST);
   }
 
-  const cardExists = await checkIfCardExists(cardBytes);
-  if (!cardExists) {
+  const cardExists = await checkIfCardExists({ alias });
+  if (!await cardExists) {
     logger.info('Card does not exist');
     writeLogToClient(req.method, {
       statusCode: NOT_FOUND,
@@ -154,11 +166,16 @@ router.post('/delete', async (req, res) => {
     return res.sendStatus(NOT_FOUND);
   }
 
-  if (await deleteCard(cardBytes)) { // successful
+  if (await deleteCard(alias)) {
     logger.info('Successfully deleted card');
     writeLogToClient(req.method, {
-      alias: cardExists.alias,
+      alias,
       statusCode: OK,
+    });
+    AuditLog.create({
+      userId: decoded._id,
+      action: AuditLogActions.DELETE_CARD,
+      details: { alias }
     });
     return res.sendStatus(OK);
   }
@@ -182,7 +199,11 @@ router.post('/getAllCards', async (req, res) => {
 
   try {
     const total = await OfficeAccessCard.count({});
-    const items = await OfficeAccessCard.find({}, {}, { skip, limit: ROWS_PER_PAGE });
+    const items = await OfficeAccessCard.find(
+      {},
+      { cardBytes: 0 },
+      { skip, limit: ROWS_PER_PAGE }
+    );
     return res.status(OK).send({
       items,
       total,
@@ -195,7 +216,8 @@ router.post('/getAllCards', async (req, res) => {
 });
 
 router.get('/listen', async (req, res) => {
-  if (!await decodeTokenFromBodyOrQuery(req)) {
+  const decoded = await decodeTokenFromBodyOrQuery(req);
+  if (!Object.keys(decoded) || decoded.accessLevel < OFFICER) {
     return res.sendStatus(UNAUTHORIZED);
   }
 

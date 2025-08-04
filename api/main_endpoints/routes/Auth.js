@@ -7,7 +7,7 @@ const passport = require('passport');
 require('../util/passport')(passport);
 const config = require('../../config/config.json');
 const User = require('../models/User.js');
-const redisClient = require('../util/redis-client.js');
+const PasswordReset = require('../models/PasswordReset.js');
 const logger = require('../../util/logger');
 const { registerUser, testPasswordStrength } = require('../util/userHelpers');
 const { verifyCaptcha } = require('../util/captcha');
@@ -116,11 +116,25 @@ router.post('/sendPasswordReset', async (req, res) => {
 
     const resetToken = id.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     try {
-      await redisClient.set(resetToken, String(result._id), {EX: PASSWORD_RESET_EXPIRATION});
+      const passwordReset = new PasswordReset({
+        resetToken,
+        userId: String(result._id),
+      });
+      await passwordReset.save();
       await sendPasswordReset(resetToken, req.body.email);
+
+      // create audit log for sending reset password email
+      AuditLog.create({
+        userId: result._id,
+        action: AuditLogActions.SEND_RESET_PW_EMAIL,
+        details: {
+          email: result.email,
+        }
+      }).catch(logger.error);
     } catch (error) {
       logger.error('unable to save password reset token:', error);
     }
+
     res.sendStatus(OK);
   });
 });
@@ -137,81 +151,89 @@ router.post('/login', function(req, res) {
     },
     function(error, user) {
       if (error) {
+        logger.error('/login User.findOne had an error', error);
         return res.status(BAD_REQUEST).send({ message: 'Bad Request.' });
       }
 
       if (!user) {
-        res
+        return res
           .status(UNAUTHORIZED)
           .send({
             message: 'Username or password does not match our records.'
           });
-      } else {
-        // Check if password matches database
-        user.comparePassword(req.body.password, function(error, isMatch) {
-          if (isMatch && !error) {
-            if (user.accessLevel === membershipState.BANNED) {
-              return res
-                .status(UNAUTHORIZED)
-                .send({ message: 'User is banned.' });
-            }
-
-            // Check if the user's email has been verified
-            if (!user.emailVerified) {
-              return res
-                .status(UNAUTHORIZED)
-                .send({ message: 'Email has not been verified' });
-            }
-
-            // If the username and password matches the database, assign and
-            // return a jwt token
-            const jwtOptions = {
-              expiresIn: '2h'
-            };
-
-            // check here to see if we should reset the pagecount. If so, do it
-            if (checkIfPageCountResets(user.lastLogin)) {
-              user.pagesPrinted = 0;
-            }
-
-            // Include fields from the User model that should
-            // be passed to the JSON Web Token (JWT)
-            const userToBeSigned = {
-              firstName: user.firstName,
-              lastName: user.lastName,
-              email: user.email,
-              accessLevel: user.accessLevel,
-              pagesPrinted: user.pagesPrinted,
-              _id: user._id
-            };
-            user
-              .save()
-              .then(() => {
-                const token = jwt.sign(
-                  userToBeSigned, config.secretKey, jwtOptions
-                );
-                // Create audit log on successful sign-in
-                AuditLog.create({
-                  userId: user._id,
-                  action: AuditLogActions.LOG_IN,
-                  details: { email: user.email }
-                }).catch(logger.error);
-
-                res.json({ token: 'JWT ' + token });
-              })
-              .catch((error) => {
-                logger.error('unable to login user', error);
-                res.sendStatus(SERVER_ERROR);
-              });
-          } else {
-            res.status(UNAUTHORIZED).send({
-              message: 'Username or password does not match our records.'
-            });
-          }
-        });
       }
-    }
-  );
+
+      // Check if password matches database
+      user.comparePassword(req.body.password, function(error, isMatch) {
+        if (!isMatch && !error) {
+          return res.status(UNAUTHORIZED).send({
+            message: 'Username or password does not match our records.'
+          });
+        }
+
+        if (user.accessLevel === membershipState.BANNED) {
+          return res
+            .status(UNAUTHORIZED)
+            .send({
+              message: 'The account with email ' +
+                    req.body.email +
+                    ' is banned',
+            });
+        }
+
+        // Check if the user's email has been verified
+        if (!user.emailVerified) {
+          return res
+            .status(UNAUTHORIZED)
+            .send({ message: `The email ${req.body.email} has not been verified` });
+        }
+
+        // If the username and password matches the database, assign and
+        // return a jwt token
+        const jwtOptions = {
+          expiresIn: '2h'
+        };
+
+        // check here to see if we should reset the pagecount. If so, do it
+        if (checkIfPageCountResets(user.lastLogin)) {
+          user.pagesPrinted = 0;
+        }
+
+        // set last login date here!!!!
+        user.lastLogin = new Date();
+
+
+        // Include fields from the User model that should
+        // be passed to the JSON Web Token (JWT)
+        const userToBeSigned = {
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email,
+          accessLevel: user.accessLevel,
+          pagesPrinted: user.pagesPrinted,
+          _id: user._id
+        };
+        user
+          .save()
+          .then(() => {
+            const token = jwt.sign(
+              userToBeSigned, config.secretKey, jwtOptions
+            );
+            // Create audit log on successful sign-in
+            AuditLog.create({
+              userId: user._id,
+              action: AuditLogActions.LOG_IN,
+              details: { email: user.email }
+            }).catch(logger.error);
+
+            res.json({ token: 'JWT ' + token });
+          })
+          .catch((error) => {
+            logger.error('unable to login user', error);
+            res.sendStatus(SERVER_ERROR);
+          });
+      });
+    });
 });
 
 // Verifies the users session if they have an active jwtToken.
@@ -316,6 +338,10 @@ router.post('/resetPassword', async (req, res) => {
     if (!userId) {
       return res.status(NOT_FOUND).send({ message: 'Invalid or expired reset token.' });
     }
+    if (!req.body.hashedId) {
+      logger.error('Missing hashedId in resetPassword request');
+      return res.status(BAD_REQUEST).send({ message: 'Missing hashedId.' });
+    }
     const validId = await bcrypt.compare(String(userId), req.body.hashedId);
     if (!validId) {
       return res.status(BAD_REQUEST).send({ message: 'Invalid user ID.' });
@@ -326,9 +352,19 @@ router.post('/resetPassword', async (req, res) => {
     }
     user.password = req.body.password;
     await user.save();
-    await redisClient.delete(req.body.resetToken);
+
+    // create audit log for user succesfully resetting password
+    AuditLog.create({
+      userId: user._id,
+      action: AuditLogActions.RESET_PW
+    }).catch(logger.error);
+    await PasswordReset.deleteOne({ resetToken: req.body.resetToken });
   } catch (error) {
     logger.error('Unable to reset password:', error);
+    // Only return 404 if the error is about the reset token, otherwise 400
+    if (error && error.message && error.message.includes('reset token')) {
+      return res.status(NOT_FOUND).send({ message: 'Invalid or expired reset token.' });
+    }
     return res.sendStatus(BAD_REQUEST);
   }
 
