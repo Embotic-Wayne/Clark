@@ -7,10 +7,11 @@ const {
 const { MAX_AMOUNT_OF_CONNECTIONS } = require('../../util/constants').MESSAGES_API;
 const express = require('express');
 const router = express.Router();
-const ChatMessage = require('../models/ChatMessage.js');
+const ChatMessage = require('../../main_endpoints/models/ChatMessage');
 const bodyParser = require('body-parser');
 const User = require('../models/User.js');
 const logger = require('../../util/logger');
+const client = require('prom-client');
 const { decodeToken, decodeTokenFromBodyOrQuery } = require('../util/token-functions.js');
 const { MetricsHandler, register } = require('../../util/metrics.js');
 
